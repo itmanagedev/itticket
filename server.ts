@@ -7,8 +7,17 @@ import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
+import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
+
+// ── Supabase Admin Client (server-side only) ───────────────────────────────
+const supabaseAdmin = (() => {
+  const url = process.env.VITE_SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) return null;
+  return createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
+})();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -432,6 +441,65 @@ async function startServer() {
     if (req.user.role !== 'admin') return res.sendStatus(403);
     db.prepare("DELETE FROM schedules WHERE id = ?").run(req.params.id);
     res.json({ message: "Escala excluída" });
+  });
+
+  // ── Supabase Admin: criar usuário ───────────────────────────────────────
+  app.post("/api/admin/create-user", async (req: any, res) => {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ message: "SUPABASE_SERVICE_ROLE_KEY não configurada no servidor." });
+    }
+
+    // Validar token Supabase do requisitante
+    const authHeader = req.headers["authorization"];
+    const token = authHeader?.split(" ")[1];
+    if (!token) return res.sendStatus(401);
+
+    const { data: { user: caller }, error: authError } = await supabaseAdmin.auth.getUser(token);
+    if (authError || !caller) return res.sendStatus(403);
+
+    // Verificar se o requisitante é admin/superadmin
+    const { data: callerProfile } = await supabaseAdmin
+      .from("profiles")
+      .select("role")
+      .eq("id", caller.id)
+      .single();
+
+    if (!callerProfile || !["admin", "superadmin"].includes(callerProfile.role)) {
+      return res.sendStatus(403);
+    }
+
+    const { email, password, displayName, role, companyId, associatedClient } = req.body;
+    if (!email || !password || !displayName) {
+      return res.status(400).json({ message: "email, password e displayName são obrigatórios." });
+    }
+
+    // Criar usuário no Supabase Auth
+    const { data, error: createError } = await supabaseAdmin.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: { display_name: displayName },
+    });
+
+    if (createError) {
+      return res.status(400).json({ message: createError.message });
+    }
+
+    // Criar perfil na tabela profiles
+    const { error: profileError } = await supabaseAdmin.from("profiles").insert({
+      id: data.user.id,
+      email,
+      display_name: displayName,
+      role: role || "pending",
+      company_id: companyId || null,
+      associated_client: associatedClient || null,
+    });
+
+    if (profileError) {
+      return res.status(400).json({ message: profileError.message });
+    }
+
+    res.status(201).json({ message: "Usuário criado com sucesso", uid: data.user.id });
   });
 
   // Webhook Proxy
