@@ -40,38 +40,8 @@ import { getTicketSlaStatus, sendWebhook } from "./utils/ticketUtils";
 import { sendWhatsAppNotification } from "./utils/whatsappUtils";
 import { startOfMonth, endOfMonth, isWithinInterval, subDays } from "date-fns";
 import { getFirestoreDate } from "./utils/dateUtils";
-import { db, auth, handleFirestoreError, OperationType } from "./firebase";
-import firebaseConfig from "../firebase-applet-config.json";
-import { 
-  collection, 
-  onSnapshot, 
-  query, 
-  where, 
-  orderBy, 
-  doc, 
-  setDoc, 
-  updateDoc, 
-  deleteDoc, 
-  getDoc,
-  getDocFromServer,
-  getDocs,
-  Timestamp,
-  addDoc,
-  writeBatch,
-  runTransaction,
-  serverTimestamp
-} from "firebase/firestore";
-import { 
-  signInWithEmailAndPassword, 
-  signOut, 
-  onAuthStateChanged,
-  createUserWithEmailAndPassword,
-  getAuth,
-  GoogleAuthProvider,
-  signInWithPopup,
-  sendPasswordResetEmail
-} from "firebase/auth";
-import { initializeApp, getApps, getApp } from "firebase/app";
+import { supabase } from "./utils/supabase";
+import { mapTicket, ticketToRow, mapProfile, profileToRow, mapCompany, mapSchedule } from "./utils/mappers";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ClientName | "dashboard" | "reports" | "settings" | "schedule">("dashboard");
@@ -110,23 +80,10 @@ export default function App() {
   
   // Test connection on mount
   useEffect(() => {
-    const testConnection = async () => {
-      try {
-        const dbInfo = {
-          projectId: db.app.options.projectId,
-          databaseId: (db as any)._databaseId?.database || '(default)',
-          apiKey: db.app.options.apiKey?.substring(0, 5) + "..."
-        };
-        console.log("Testing Firestore connection...", dbInfo);
-        
-        // This will likely fail with permission error if not allowed, but it tests reachability
-        await getDocFromServer(doc(db, "_test_connection_", "ping"));
-        console.log("Firestore connection test successful");
-      } catch (e) {
-        console.log("Firestore connection test finished (expected failure or success):", e instanceof Error ? e.message : String(e));
-      }
-    };
-    testConnection();
+    supabase.from("companies").select("id").limit(1).then(({ error }) => {
+      if (error) console.warn("Supabase connection test:", error.message);
+      else console.log("Supabase connection OK");
+    });
   }, []);
 
   // Refs to avoid stale closures in SLA monitor
@@ -199,12 +156,12 @@ export default function App() {
     }).format(now));
 
     // Daily Backup Check (Admin/Super Admin)
-    if ((userProfile?.role === 'superadmin' || userProfile?.role === 'admin') && brasiliaHour >= 9 && currentCompanyId) {
+    if ((userProfile?.role === "superadmin" || userProfile?.role === "admin") && brasiliaHour >= 9 && currentCompanyId) {
       const checkBackup = async () => {
         try {
           const backupId = `${brasiliaDate}_${currentCompanyId}`;
-          const backupDoc = await getDoc(doc(db, "backups", backupId));
-          if (!backupDoc.exists()) {
+          const { data } = await supabase.from("backups").select("id").eq("id", backupId).single();
+          if (!data) {
             console.log(`[BACKUP] Iniciando backup automático da empresa ${currentCompanyId} do dia ${brasiliaDate}`);
             handleCreateBackup();
           }
@@ -226,9 +183,17 @@ export default function App() {
 
     // Update lastSlaCheckDate immediately to avoid race conditions from multiple clients
     try {
-      await updateDoc(doc(db, "companies", currentCompanyId), {
-        "settings.lastSlaCheckDate": brasiliaDate
-      });
+      const { data: companyRow } = await supabase
+        .from("companies")
+        .select("settings")
+        .eq("id", currentCompanyId)
+        .single();
+      const updatedSettings = { ...(companyRow?.settings || {}), lastSlaCheckDate: brasiliaDate };
+      const { error } = await supabase
+        .from("companies")
+        .update({ settings: updatedSettings })
+        .eq("id", currentCompanyId);
+      if (error) throw error;
     } catch (error) {
       console.error("Erro ao atualizar data da última verificação de SLA:", error);
       return;
@@ -268,10 +233,10 @@ export default function App() {
             
             if (result.success !== false) {
               // Marca como notificado
-              await updateDoc(doc(db, "tickets", ticket.id), {
-                slaNotified: true,
-                slaNotifiedAt: new Date().toISOString()
-              });
+              await supabase
+                .from("tickets")
+                .update({ sla_notified: true, sla_notified_at: new Date().toISOString() })
+                .eq("id", ticket.id);
             }
 
           } catch (error) {
@@ -296,38 +261,21 @@ export default function App() {
   }, []);
 
   const handleArchiveOldTickets = async () => {
-    if (!auth.currentUser || !currentCompanyId || (userProfile?.role !== "admin" && userProfile?.role !== "superadmin")) return;
-    
+    if (!currentCompanyId || (userProfile?.role !== "admin" && userProfile?.role !== "superadmin")) return;
+
     try {
-      const thirtyDaysAgo = subDays(new Date(), 30);
-      const q = query(
-        collection(db, "tickets"),
-        where("companyId", "==", currentCompanyId),
-        where("status", "==", "Resolvido")
-      );
-      
-      const querySnapshot = await getDocs(q);
-      const batch = writeBatch(db);
-      let count = 0;
+      const thirtyDaysAgo = subDays(new Date(), 30).toISOString();
+      const { error } = await supabase
+        .from("tickets")
+        .update({ archived: 1 })
+        .eq("company_id", currentCompanyId)
+        .eq("status", "Resolvido")
+        .eq("archived", 0)
+        .lt("updated_at", thirtyDaysAgo);
 
-      querySnapshot.forEach((docSnap) => {
-        const ticket = docSnap.data();
-        // Only archive if not already archived and is old enough
-        if (ticket.archived !== 1) {
-          const updatedAt = getFirestoreDate(ticket.updatedAt);
-          if (updatedAt && updatedAt < thirtyDaysAgo) {
-            batch.update(docSnap.ref, { archived: 1 });
-            count++;
-          }
-        }
-      });
-
-      if (count > 0) {
-        await batch.commit();
-        console.log(`${count} tickets archived.`);
-      }
+      if (error) console.error("Erro ao arquivar tickets:", error.message);
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, "tickets/batch-archive");
+      console.error("Erro ao arquivar tickets antigos:", error);
     }
   };
 
@@ -398,127 +346,114 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [userProfile, setIsModalOpen, setSelectedTicket, setIsSidebarOpen]);
 
-  // Firebase Auth Observer
+  // Supabase Auth Observer
   useEffect(() => {
-    console.log("Setting up Auth observer...");
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-      console.log("Auth state changed:", firebaseUser?.email);
-      if (firebaseUser) {
-        console.log("Firebase Auth State: User logged in", {
-          uid: firebaseUser.uid,
-          email: firebaseUser.email,
-          emailVerified: firebaseUser.emailVerified
-        });
-        setUser(firebaseUser);
-        setAuthError(null);
-        
-        const userRef = doc(db, "users", firebaseUser.uid);
-        
-        // Use onSnapshot for real-time profile updates and more robust initial load
-        const unsubProfile = onSnapshot(userRef, async (docSnap) => {
-          if (docSnap.exists()) {
-            console.log("User profile loaded via snapshot:", docSnap.id);
-            let profile = docSnap.data() as UserProfile;
-            
-            // Bootstrap superadmin by email
-            if (firebaseUser.email?.toLowerCase() === "nairtonbraga00@gmail.com") {
-              profile.role = "superadmin";
-            }
-            
-            setUserProfile(profile);
-            
-            // Fetch company data if needed
-            if (profile.companyId) {
-              try {
-                const companyDoc = await getDoc(doc(db, "companies", profile.companyId));
-                if (companyDoc.exists()) {
-                  setCompany(companyDoc.data() as Company);
-                }
-              } catch (e) {
-                console.error("Error fetching company data:", e);
-              }
-            }
-            
-            setLoading(false);
-          } else {
-            console.log("User profile does not exist, creating...");
-            try {
-              const defaultCompanyId = "itmanage";
-              
-              // Check if default company exists, if not create it
-              const companyRef = doc(db, "companies", defaultCompanyId);
-              const companySnap = await getDoc(companyRef);
-              if (!companySnap.exists()) {
-                await setDoc(companyRef, {
-                  id: defaultCompanyId,
-                  name: "IT Manage",
-                  active: true,
-                  createdAt: new Date().toISOString(),
-                  settings: {
-                    webhookUrl: "",
-                    clientLogos: {},
-                    clientResponsibles: {},
-                    customClients: [],
-                    customCategories: []
-                  }
-                });
-              }
+    console.log("Setting up Supabase Auth observer...");
 
-              const profile: UserProfile = {
-                uid: firebaseUser.uid,
-                companyId: defaultCompanyId,
-                email: firebaseUser.email || "",
-                displayName: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || "Usuário",
-                role: firebaseUser.email?.toLowerCase() === "nairtonbraga00@gmail.com" ? "superadmin" : "pending"
-              };
-              await setDoc(userRef, profile);
-              console.log("User profile and default company ensured");
-            } catch (e) {
-              console.error("Error creating user profile:", e);
-              setAuthError("Erro ao criar perfil de usuário. Verifique as permissões.");
-              setLoading(false);
-            }
-          }
-        }, async (error) => {
-          console.error("User profile snapshot error:", error);
-          
-          // Fallback to getDocFromServer if snapshot fails
-          try {
-            console.log("Attempting fallback profile load via getDocFromServer...");
-            const docSnap = await getDocFromServer(userRef);
-            if (docSnap.exists()) {
-              console.log("User profile loaded via fallback:", docSnap.id);
-              let profile = docSnap.data() as UserProfile;
-              if (firebaseUser.email?.toLowerCase() === "nairtonbraga00@gmail.com") {
-                profile.role = "superadmin";
-              }
-              setUserProfile(profile);
-              setLoading(false);
-              return;
-            }
-          } catch (fallbackError) {
-            console.error("Fallback profile load failed:", fallbackError);
+    const loadProfile = async (authUser: any) => {
+      const { data: profileRow, error } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", authUser.id)
+        .single();
+
+      if (profileRow) {
+        let profile = mapProfile(profileRow);
+        if (authUser.email?.toLowerCase() === "nairtonbraga00@gmail.com") {
+          profile.role = "superadmin";
+        }
+        setUserProfile(profile);
+
+        if (profile.companyId) {
+          const { data: companyRow } = await supabase
+            .from("companies")
+            .select("*")
+            .eq("id", profile.companyId)
+            .single();
+          if (companyRow) setCompany(mapCompany(companyRow));
+        }
+        setLoading(false);
+      } else if (error?.code === "PGRST116" || error?.code === "PGRST205" || error?.details?.includes("0 rows")) {
+        // Perfil não existe — criar
+        console.log("Perfil não existe, criando...");
+        try {
+          const defaultCompanyId = "itmanage";
+
+          // Garantir empresa padrão
+          const { data: existingCompany } = await supabase
+            .from("companies")
+            .select("id")
+            .eq("id", defaultCompanyId)
+            .single();
+
+          if (!existingCompany) {
+            await supabase.from("companies").insert({
+              id: defaultCompanyId,
+              name: "IT Manage",
+              active: true,
+              created_at: new Date().toISOString(),
+              settings: { webhookUrl: "", customClients: [], customCategories: [] },
+            });
           }
 
-          // Only show error if we don't have a profile yet to avoid flickering on transient errors
-          if (!userProfile) {
-            setAuthError(`Erro de permissão ao acessar perfil: ${error.message}`);
-          }
+          const newProfile: UserProfile = {
+            uid: authUser.id,
+            companyId: defaultCompanyId,
+            email: authUser.email || "",
+            displayName:
+              authUser.user_metadata?.full_name ||
+              authUser.user_metadata?.name ||
+              authUser.email?.split("@")[0] ||
+              "Usuário",
+            role:
+              authUser.email?.toLowerCase() === "nairtonbraga00@gmail.com"
+                ? "superadmin"
+                : "pending",
+          };
+
+          await supabase.from("profiles").insert(profileToRow(newProfile));
+          setUserProfile(newProfile);
           setLoading(false);
-        });
-
-        return () => unsubProfile();
+        } catch (e) {
+          console.error("Erro ao criar perfil:", e);
+          setAuthError("Erro ao criar perfil de usuário.");
+          setLoading(false);
+        }
       } else {
-        console.log("No user authenticated");
-        setUser(null);
-        setUserProfile(null);
-        setCompany(null);
+        setAuthError(`Erro ao carregar perfil: ${error?.message}`);
+        setLoading(false);
+      }
+    };
+
+    // Sessão inicial
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        setUser(session.user);
         setAuthError(null);
+        loadProfile(session.user);
+      } else {
         setLoading(false);
       }
     });
 
-    return () => unsubscribe();
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (_event, session) => {
+        console.log("Auth state changed:", session?.user?.email);
+        if (session?.user) {
+          setUser(session.user);
+          setAuthError(null);
+          loadProfile(session.user);
+        } else {
+          setUser(null);
+          setUserProfile(null);
+          setCompany(null);
+          setAuthError(null);
+          setLoading(false);
+        }
+      }
+    );
+
+    return () => subscription.unsubscribe();
   }, []);
 
   // Set default tab for clients
@@ -535,159 +470,140 @@ export default function App() {
     }
   }, [userProfile, selectedCompanyId]);
 
-  // Real-time Data Fetching (Firestore)
+  // Real-time Data Fetching (Supabase)
   useEffect(() => {
     if (!user || !userProfile) return;
-    if (userProfile.role !== 'superadmin' && !currentCompanyId) return;
+    if (userProfile.role !== "superadmin" && !currentCompanyId) return;
 
     const companyId = currentCompanyId || userProfile.companyId;
+    const channels: ReturnType<typeof supabase.channel>[] = [];
 
-    // Tickets Subscription
-    let ticketsQuery;
-    if (userProfile.role === 'superadmin' && !selectedCompanyId) {
-      ticketsQuery = query(
-        collection(db, "tickets"),
-        orderBy("createdAt", "desc")
-      );
-    } else if (userProfile.role === 'admin' || userProfile.role === 'user' || userProfile.associatedClient === 'Todos' || userProfile.role === 'superadmin') {
-      ticketsQuery = query(
-        collection(db, "tickets"),
-        where("companyId", "==", companyId),
-        orderBy("createdAt", "desc")
-      );
-    } else {
-      ticketsQuery = query(
-        collection(db, "tickets"),
-        where("companyId", "==", companyId),
-        where("client", "==", userProfile.associatedClient || "")
-      );
-    }
+    // ── Tickets ──────────────────────────────────────────
+    const fetchTickets = async () => {
+      let q = supabase.from("tickets").select("*").order("created_at", { ascending: false });
+      if (userProfile.role !== "superadmin" || selectedCompanyId) {
+        q = q.eq("company_id", companyId);
+      }
+      if (userProfile.role === "client" && userProfile.associatedClient && userProfile.associatedClient !== "Todos") {
+        q = q.eq("client", userProfile.associatedClient);
+      }
+      const { data } = await q;
+      setTickets((data || []).map(mapTicket));
+    };
 
-    const unsubTickets = onSnapshot(ticketsQuery, (snapshot) => {
-      console.log(`Tickets snapshot received: ${snapshot.size} tickets found for company ${companyId}`);
-      const ticketsData = snapshot.docs.map(doc => ({
-        ...doc.data(),
-        id: doc.id
-      })) as Ticket[];
-      setTickets(ticketsData);
-    }, (error) => handleFirestoreError(error, OperationType.LIST, "tickets"));
+    fetchTickets();
 
-    // List all companies for superadmin to help find missing data
-    if (userProfile.role === 'superadmin') {
-      getDocs(collection(db, "companies")).then(snap => {
-        console.log("All companies in database:", snap.docs.map(d => ({ id: d.id, ...d.data() })));
-      });
-      getDocs(collection(db, "tickets")).then(snap => {
-        console.log(`Total tickets in database (all companies): ${snap.size}`);
-      });
-      getDocs(collection(db, "users")).then(snap => {
-        console.log(`Total users in database: ${snap.size}`, snap.docs.map(d => d.id));
-      });
-    }
+    const ticketsChannel = supabase
+      .channel(`tickets:${companyId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, fetchTickets)
+      .subscribe();
+    channels.push(ticketsChannel);
 
-    // Settings Subscription (Now from Company document)
-    let unsubSettings = () => {};
+    // ── Company / Settings ───────────────────────────────
+    const fetchCompany = async () => {
+      if (!companyId) return;
+      const { data } = await supabase.from("companies").select("*").eq("id", companyId).single();
+      if (data) {
+        const mapped = mapCompany(data);
+        setCompany(mapped);
+        const s = (mapped.settings || {}) as Partial<AppSettings>;
+        setSettings(prev => ({
+          ...prev,
+          ...s,
+          whatsappClientsList: s.whatsappClientsList || [],
+          whatsappResponsiblesList: s.whatsappResponsiblesList || [],
+          clientLogos: s.clientLogos || {},
+          clientResponsibles: s.clientResponsibles || {},
+          customClients: s.customClients || [],
+          customCategories: s.customCategories || [],
+          disabledSlaClients: s.disabledSlaClients || [],
+        }));
+      }
+    };
+
+    fetchCompany();
+
     if (companyId) {
-      unsubSettings = onSnapshot(doc(db, "companies", companyId), (doc) => {
-        if (doc.exists()) {
-          const companyData = doc.data() as Company;
-          const data = (companyData.settings || {}) as Partial<AppSettings>;
-          setCompany(companyData);
-          setSettings(prev => ({ 
-            ...prev, 
-            ...data,
-            whatsappClientsList: data.whatsappClientsList || [],
-            whatsappResponsiblesList: data.whatsappResponsiblesList || [],
-            clientLogos: data.clientLogos || {},
-            clientResponsibles: data.clientResponsibles || {},
-            customClients: data.customClients || [],
-            customCategories: data.customCategories || [],
-            disabledSlaClients: data.disabledSlaClients || []
-          }));
+      const companyChannel = supabase
+        .channel(`company:${companyId}`)
+        .on("postgres_changes", { event: "*", schema: "public", table: "companies", filter: `id=eq.${companyId}` }, fetchCompany)
+        .subscribe();
+      channels.push(companyChannel);
+    }
+
+    // ── Schedules ────────────────────────────────────────
+    const fetchSchedules = async () => {
+      let q = supabase.from("schedules").select("*").order("date", { ascending: true });
+      if (userProfile.role !== "superadmin" || selectedCompanyId) {
+        q = q.eq("company_id", companyId);
+      }
+      const { data } = await q;
+      setSchedules((data || []).map(mapSchedule));
+    };
+
+    fetchSchedules();
+
+    const schedulesChannel = supabase
+      .channel(`schedules:${companyId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "schedules" }, fetchSchedules)
+      .subscribe();
+    channels.push(schedulesChannel);
+
+    // ── Users (admin only) ───────────────────────────────
+    if (userProfile.role === "admin" || userProfile.role === "superadmin") {
+      const fetchUsers = async () => {
+        let q = supabase.from("profiles").select("*");
+        if (userProfile.role !== "superadmin" || selectedCompanyId) {
+          q = q.eq("company_id", companyId);
         }
-      }, (error) => handleFirestoreError(error, OperationType.GET, `companies/${companyId}`));
+        const { data } = await q;
+        setUsers((data || []).map(mapProfile));
+      };
+
+      fetchUsers();
+
+      const usersChannel = supabase
+        .channel(`profiles:${companyId}`)
+        .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, fetchUsers)
+        .subscribe();
+      channels.push(usersChannel);
     }
 
-    // Schedules Subscription
-    let unsubSchedules = () => {};
-    if (companyId || userProfile.role === 'superadmin') {
-      const schedulesQuery = (userProfile.role === 'superadmin' && !selectedCompanyId)
-        ? query(collection(db, "schedules"), orderBy("date", "asc"))
-        : query(
-            collection(db, "schedules"), 
-            where("companyId", "==", companyId),
-            orderBy("date", "asc")
-          );
+    // ── Companies + Backups (superadmin) ─────────────────
+    if (userProfile.role === "superadmin") {
+      const fetchCompanies = async () => {
+        const { data } = await supabase.from("companies").select("*");
+        setCompanies((data || []).map(mapCompany));
+      };
+      fetchCompanies();
 
-      unsubSchedules = onSnapshot(
-        schedulesQuery, 
-        (snapshot) => {
-          const schedulesData = snapshot.docs.map(doc => ({
-            ...doc.data(),
-            id: doc.id
-          }));
-          setSchedules(schedulesData);
-        }, (error) => handleFirestoreError(error, OperationType.LIST, "schedules"));
+      const companiesChannel = supabase
+        .channel("companies:all")
+        .on("postgres_changes", { event: "*", schema: "public", table: "companies" }, fetchCompanies)
+        .subscribe();
+      channels.push(companiesChannel);
     }
 
-    // Users Subscription (Admin only)
-    let unsubUsers = () => {};
-    if (userProfile.role === 'admin' || userProfile.role === 'superadmin') {
-      const usersQuery = (userProfile.role === 'superadmin' && !selectedCompanyId)
-        ? collection(db, "users")
-        : query(collection(db, "users"), where("companyId", "==", companyId));
+    if (userProfile.role === "superadmin" || userProfile.role === "admin") {
+      const fetchBackups = async () => {
+        let q = supabase.from("backups").select("*").order("timestamp", { ascending: false });
+        if (userProfile.role === "admin" && currentCompanyId) {
+          q = q.eq("company_id", currentCompanyId);
+        }
+        const { data } = await q;
+        setBackups(data || []);
+      };
+      fetchBackups();
 
-      unsubUsers = onSnapshot(
-        usersQuery, 
-        (snapshot) => {
-          const usersData = snapshot.docs.map(doc => ({
-            ...doc.data(),
-            id: doc.id
-          }));
-          setUsers(usersData);
-        }, (error) => handleFirestoreError(error, OperationType.LIST, "users"));
-    }
-
-    // Companies Subscription (Super Admin only)
-    let unsubCompanies = () => {};
-    // Backups Subscription (Super Admin only - Global view of all backups)
-    let unsubBackups = () => {};
-    if (userProfile.role === 'superadmin') {
-      unsubCompanies = onSnapshot(
-        collection(db, "companies"),
-        (snapshot) => {
-          const companiesData = snapshot.docs.map(doc => ({
-            ...doc.data(),
-            id: doc.id
-          })) as Company[];
-          setCompanies(companiesData);
-        }, (error) => handleFirestoreError(error, OperationType.LIST, "companies"));
-
-      unsubBackups = onSnapshot(
-        query(collection(db, "backups"), orderBy("timestamp", "desc")),
-        (snapshot) => {
-          setBackups(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
-        }, (error) => handleFirestoreError(error, OperationType.LIST, "backups"));
-    } else if (userProfile.role === 'admin' && currentCompanyId) {
-      // Admins see backups for their company
-      unsubBackups = onSnapshot(
-        query(
-          collection(db, "backups"), 
-          where("companyId", "==", currentCompanyId),
-          orderBy("timestamp", "desc")
-        ),
-        (snapshot) => {
-          setBackups(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
-        }, (error) => handleFirestoreError(error, OperationType.LIST, "backups"));
+      const backupsChannel = supabase
+        .channel(`backups:${companyId}`)
+        .on("postgres_changes", { event: "*", schema: "public", table: "backups" }, fetchBackups)
+        .subscribe();
+      channels.push(backupsChannel);
     }
 
     return () => {
-      unsubTickets();
-      unsubSettings();
-      unsubSchedules();
-      unsubUsers();
-      unsubCompanies();
-      unsubBackups();
+      channels.forEach(ch => supabase.removeChannel(ch));
     };
   }, [user, userProfile, showArchived, currentCompanyId, selectedCompanyId]);
 
@@ -739,16 +655,18 @@ export default function App() {
     setLoginError("");
     setLoading(true);
     try {
-      await signInWithEmailAndPassword(auth, loginEmail, loginPassword);
+      const { error } = await supabase.auth.signInWithPassword({
+        email: loginEmail.trim(),
+        password: loginPassword.trim(),
+      });
+      if (error) throw error;
       toast.success("Login realizado com sucesso!");
     } catch (error: any) {
       console.error("Login error:", error);
-      if (error.code === 'auth/operation-not-allowed') {
-        setLoginError("O login por e-mail/senha não está ativado. Por favor, use o 'Google Login' abaixo.");
-      } else if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password' || error.code === 'auth/invalid-credential') {
+      if (error.message?.includes("Invalid login credentials")) {
         setLoginError("E-mail ou senha incorretos.");
-      } else if (error.code === 'auth/too-many-requests') {
-        setLoginError("Muitas tentativas falhas. Tente novamente mais tarde.");
+      } else if (error.message?.includes("Email not confirmed")) {
+        setLoginError("E-mail não confirmado. Verifique sua caixa de entrada.");
       } else {
         setLoginError("Erro ao realizar login. Tente novamente.");
       }
@@ -761,18 +679,14 @@ export default function App() {
       setLoginError("Por favor, digite seu e-mail primeiro.");
       return;
     }
-    
     try {
-      await sendPasswordResetEmail(auth, loginEmail);
+      const { error } = await supabase.auth.resetPasswordForEmail(loginEmail.trim());
+      if (error) throw error;
       toast.success("E-mail de recuperação enviado!");
       setLoginError("");
     } catch (error: any) {
       console.error("Reset password error:", error);
-      if (error.code === 'auth/user-not-found') {
-        setLoginError("E-mail não encontrado no sistema.");
-      } else {
-        setLoginError("Erro ao enviar e-mail de recuperação.");
-      }
+      setLoginError("Erro ao enviar e-mail de recuperação.");
     }
   };
 
@@ -780,31 +694,21 @@ export default function App() {
     setLoginError("");
     setLoading(true);
     try {
-      const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
-      toast.success("Login com Google realizado!");
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: { redirectTo: window.location.origin },
+      });
+      if (error) throw error;
     } catch (error: any) {
       console.error("Google login error:", error);
-      let message = "Erro ao realizar login com Google.";
-      const errorCode = error.code || "unknown";
-      
-      if (errorCode === 'auth/operation-not-allowed') {
-        message = "O login por Google não está ativado no Firebase Console. Ative-o em Authentication > Sign-in method.";
-      } else if (errorCode === 'auth/popup-blocked') {
-        message = "O pop-up de login foi bloqueado pelo navegador. Por favor, permita pop-ups para este site.";
-      } else if (errorCode === 'auth/unauthorized-domain') {
-        message = "Este domínio não está autorizado no Firebase Console. Adicione '" + window.location.hostname + "' aos domínios autorizados.";
-      } else {
-        message = `Erro (${errorCode}): ${error.message || "Erro desconhecido"}`;
-      }
-      setLoginError(message);
+      setLoginError(`Erro ao realizar login com Google: ${error.message || "Erro desconhecido"}`);
       setLoading(false);
     }
   };
 
   const handleLogout = async () => {
     try {
-      await signOut(auth);
+      await supabase.auth.signOut();
       toast.success("Sessão encerrada");
     } catch (error) {
       console.error("Logout error:", error);
@@ -812,22 +716,23 @@ export default function App() {
   };
 
   const handleDeleteCompany = async (id: string) => {
-    if (userProfile?.role !== 'superadmin') return;
-    if (id === 'itmanage') {
+    if (userProfile?.role !== "superadmin") return;
+    if (id === "itmanage") {
       toast.error("A empresa principal não pode ser excluída.");
       return;
     }
-    
     try {
-      await deleteDoc(doc(db, "companies", id));
+      const { error } = await supabase.from("companies").delete().eq("id", id);
+      if (error) throw error;
       toast.success("Empresa excluída com sucesso!");
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `companies/${id}`);
+    } catch (error: any) {
+      console.error("Erro ao excluir empresa:", error);
+      toast.error("Erro ao excluir empresa: " + error.message);
     }
   };
 
   const handleCreateBackup = async () => {
-    if (!currentCompanyId || (userProfile?.role !== 'superadmin' && userProfile?.role !== 'admin')) return;
+    if (!currentCompanyId || (userProfile?.role !== "superadmin" && userProfile?.role !== "admin")) return;
     const toastId = toast.loading("Criando backup da empresa...");
     try {
       const now = new Date();
@@ -835,44 +740,41 @@ export default function App() {
         timeZone: "America/Sao_Paulo",
         year: "numeric",
         month: "2-digit",
-        day: "2-digit"
+        day: "2-digit",
       }).format(now);
 
       const companyId = currentCompanyId;
       const backupId = `${brasiliaDate}_${companyId}`;
 
-      // Fetch only data for this company
-      const [ticketsSnap, usersSnap, schedulesSnap, companySnap] = await Promise.all([
-        getDocs(query(collection(db, "tickets"), where("companyId", "==", companyId))),
-        getDocs(query(collection(db, "users"), where("companyId", "==", companyId))),
-        getDocs(query(collection(db, "schedules"), where("companyId", "==", companyId))),
-        getDoc(doc(db, "companies", companyId))
-      ]);
+      const [{ data: ticketsData }, { data: usersData }, { data: schedulesData }, { data: companyData }] =
+        await Promise.all([
+          supabase.from("tickets").select("*").eq("company_id", companyId),
+          supabase.from("profiles").select("*").eq("company_id", companyId),
+          supabase.from("schedules").select("*").eq("company_id", companyId),
+          supabase.from("companies").select("*").eq("id", companyId).single(),
+        ]);
 
-      const backupData = {
+      await supabase.from("backups").upsert({
+        id: backupId,
+        company_id: companyId,
         timestamp: now.toISOString(),
-        companyId: companyId,
         date: brasiliaDate,
-        tickets: ticketsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
-        users: usersSnap.docs.map(d => ({ id: d.id, ...d.data() })),
-        schedules: schedulesSnap.docs.map(d => ({ id: d.id, ...d.data() })),
-        company: companySnap.exists() ? { id: companySnap.id, ...companySnap.data() } : null
-      };
+        tickets: ticketsData || [],
+        users: usersData || [],
+        schedules: schedulesData || [],
+        company: companyData || null,
+      });
 
-      await setDoc(doc(db, "backups", backupId), backupData);
+      // Limpar backups antigos (manter os 7 mais recentes)
+      const { data: allBackups } = await supabase
+        .from("backups")
+        .select("id, timestamp")
+        .eq("company_id", companyId)
+        .order("timestamp", { ascending: true });
 
-      // Cleanup old backups for THIS company (> 7 days)
-      const backupsSnap = await getDocs(query(
-        collection(db, "backups"), 
-        where("companyId", "==", companyId),
-        orderBy("timestamp", "asc")
-      ));
-      
-      if (backupsSnap.size > 7) {
-        const toDelete = backupsSnap.docs.slice(0, backupsSnap.size - 7);
-        const batch = writeBatch(db);
-        toDelete.forEach(d => batch.delete(d.ref));
-        await batch.commit();
+      if (allBackups && allBackups.length > 7) {
+        const toDelete = allBackups.slice(0, allBackups.length - 7).map(b => b.id);
+        await supabase.from("backups").delete().in("id", toDelete);
       }
 
       toast.success("Backup da empresa criado com sucesso!", { id: toastId });
@@ -883,46 +785,47 @@ export default function App() {
   };
 
   const handleRestoreBackup = async (backupId: string) => {
-    if (!currentCompanyId || (userProfile?.role !== 'superadmin' && userProfile?.role !== 'admin')) return;
-    
+    if (!currentCompanyId || (userProfile?.role !== "superadmin" && userProfile?.role !== "admin")) return;
+
     const toastId = toast.loading("Restaurando backup da empresa...");
     try {
-      const backupSnap = await getDoc(doc(db, "backups", backupId));
-      if (!backupSnap.exists()) {
+      const { data: backup } = await supabase.from("backups").select("*").eq("id", backupId).single();
+      if (!backup) {
         toast.error("Backup não encontrado", { id: toastId });
         return;
       }
 
-      const backup = backupSnap.data();
-      const companyId = backup.companyId;
+      const companyId = backup.company_id;
 
-      // Collections to restore
-      const collections = ["tickets", "users", "schedules"];
-      
-      for (const coll of collections) {
-        // Delete current company data in this collection
-        const snap = await getDocs(query(collection(db, coll), where("companyId", "==", companyId)));
-        const batch = writeBatch(db);
-        snap.forEach(d => batch.delete(d.ref));
-        await batch.commit();
-        
-        // Restore from backup
-        const data = backup[coll] || [];
-        for (let i = 0; i < data.length; i += 400) {
-          const chunk = data.slice(i, i + 400);
-          const restoreBatch = writeBatch(db);
-          chunk.forEach((item: any) => {
-            const { id, ...rest } = item;
-            restoreBatch.set(doc(db, coll, id), rest);
-          });
-          await restoreBatch.commit();
-        }
+      // Deletar dados atuais
+      await Promise.all([
+        supabase.from("tickets").delete().eq("company_id", companyId),
+        supabase.from("profiles").delete().eq("company_id", companyId),
+        supabase.from("schedules").delete().eq("company_id", companyId),
+      ]);
+
+      // Restaurar tickets em lotes
+      const tickets = backup.tickets || [];
+      for (let i = 0; i < tickets.length; i += 400) {
+        await supabase.from("tickets").insert(tickets.slice(i, i + 400));
       }
 
-      // Restore company settings
+      // Restaurar usuários
+      const users = backup.users || [];
+      for (let i = 0; i < users.length; i += 400) {
+        await supabase.from("profiles").upsert(users.slice(i, i + 400));
+      }
+
+      // Restaurar escalas
+      const schedules = backup.schedules || [];
+      for (let i = 0; i < schedules.length; i += 400) {
+        await supabase.from("schedules").insert(schedules.slice(i, i + 400));
+      }
+
+      // Restaurar configurações da empresa
       if (backup.company) {
         const { id, ...companyData } = backup.company;
-        await setDoc(doc(db, "companies", id), companyData);
+        await supabase.from("companies").upsert({ id, ...companyData });
       }
 
       toast.success("Empresa restaurada com sucesso! Recarregando...", { id: toastId });
@@ -936,12 +839,15 @@ export default function App() {
   const handleUpdateSettings = async (updates: Partial<AppSettings>) => {
     if (!currentCompanyId) return;
     try {
-      await updateDoc(doc(db, "companies", currentCompanyId), {
-        settings: { ...settings, ...updates }
-      });
+      const { error } = await supabase
+        .from("companies")
+        .update({ settings: { ...settings, ...updates } })
+        .eq("id", currentCompanyId);
+      if (error) throw error;
       toast.success("Configurações salvas!");
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `companies/${currentCompanyId}`);
+    } catch (error: any) {
+      console.error("Erro ao salvar configurações:", error);
+      toast.error("Erro ao salvar configurações: " + error.message);
     }
   };
 
@@ -949,31 +855,34 @@ export default function App() {
     if (!currentCompanyId) return;
     const { email, password, ...profile } = userData;
     try {
-      // Use a secondary app to create the user without logging out the admin
-      const secondaryApp = getApps().find(a => a.name === "Secondary") || initializeApp(firebaseConfig, "Secondary");
-      const secondaryAuth = getAuth(secondaryApp);
-      
-      const userCredential = await createUserWithEmailAndPassword(secondaryAuth, email, password);
-      const uid = userCredential.user.uid;
-      
-      const profileData = {
-        ...profile,
-        uid,
-        companyId: profile.companyId || currentCompanyId,
-        email,
-        createdAt: new Date().toISOString()
-      };
-      
-      if (profileData.associatedClient) {
-        profileData.associatedClient = profileData.associatedClient.trim();
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+
+      const response = await fetch("/api/admin/create-user", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          email,
+          password,
+          displayName: profile.displayName,
+          role: profile.role || "pending",
+          companyId: profile.companyId || currentCompanyId,
+          associatedClient: profile.associatedClient?.trim() || null,
+        }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.message || "Erro ao criar usuário");
       }
-      
-      await setDoc(doc(db, "users", uid), profileData);
-      
-      await signOut(secondaryAuth);
+
       toast.success("Usuário criado com sucesso!");
     } catch (error: any) {
-      handleFirestoreError(error, OperationType.CREATE, `users/${email}`);
+      console.error("Erro ao criar usuário:", error);
+      toast.error("Erro ao criar usuário: " + error.message);
     }
   };
 
@@ -983,19 +892,26 @@ export default function App() {
       if (updateData.associatedClient) {
         updateData.associatedClient = updateData.associatedClient.trim();
       }
-      await setDoc(doc(db, "users", uid), updateData, { merge: true });
+      const { error } = await supabase
+        .from("profiles")
+        .update(profileToRow(updateData))
+        .eq("id", uid);
+      if (error) throw error;
       toast.success("Usuário atualizado com sucesso!");
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `users/${uid}`);
+    } catch (error: any) {
+      console.error("Erro ao atualizar usuário:", error);
+      toast.error("Erro ao atualizar usuário: " + error.message);
     }
   };
 
   const handleDeleteUser = async (uid: string) => {
     try {
-      await deleteDoc(doc(db, "users", uid));
+      const { error } = await supabase.from("profiles").delete().eq("id", uid);
+      if (error) throw error;
       toast.success("Usuário removido do sistema!");
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `users/${uid}`);
+    } catch (error: any) {
+      console.error("Erro ao excluir usuário:", error);
+      toast.error("Erro ao excluir usuário: " + error.message);
     }
   };
 
@@ -1005,26 +921,10 @@ export default function App() {
       const now = new Date().toISOString();
       const companyId = currentCompanyId;
       
-      const ticketId = await runTransaction(db, async (transaction) => {
-        const companyRef = doc(db, "companies", companyId);
-        const companySnap = await transaction.get(companyRef);
-        
-        let nextId = 2000;
-        if (companySnap.exists()) {
-          const data = companySnap.data() as Company;
-          if (data.settings?.nextTicketId && typeof data.settings.nextTicketId === 'number') {
-            nextId = data.settings.nextTicketId;
-          }
-        }
-        
-        transaction.set(companyRef, { 
-          settings: { 
-            ...companySnap.data()?.settings,
-            nextTicketId: nextId + 1 
-          } 
-        }, { merge: true });
-        return nextId.toString();
+      const { data: ticketId, error: rpcError } = await supabase.rpc("get_next_ticket_id", {
+        p_company_id: companyId,
       });
+      if (rpcError) throw rpcError;
       
       const formattedData: any = {
         ...ticketData,
@@ -1054,20 +954,22 @@ export default function App() {
         formattedData.inProgressSince = now;
       }
 
-      await setDoc(doc(db, "tickets", ticketId), formattedData);
-      
-      // Enviar notificações em segundo plano para não travar a UI
+      const { error: insertError } = await supabase.from("tickets").insert(ticketToRow(formattedData));
+      if (insertError) throw insertError;
+
+      // Enviar notificações em segundo plano
       sendWebhook(formattedData as Ticket, settings, "create").catch(console.error);
       sendWhatsAppNotification(formattedData as Ticket, settings, "create").then(waResult => {
         if (waResult && !waResult.success) {
           toast.error("Chamado criado, mas falha no WhatsApp: " + waResult.error);
         }
       }).catch(console.error);
-      
+
       setIsModalOpen(false);
       toast.success("Chamado criado com sucesso!");
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, "tickets");
+    } catch (error: any) {
+      console.error("Erro ao criar chamado:", error);
+      toast.error("Erro ao criar chamado: " + error.message);
     }
   };
 
@@ -1167,11 +1069,12 @@ export default function App() {
       }
 
       const finalHistory = [...(originalTicket?.history || []), ...historyEntries];
-      
-      await updateDoc(doc(db, "tickets", ticketId), {
-        ...formattedUpdates,
-        history: finalHistory
-      });
+
+      const { error: updateError } = await supabase
+        .from("tickets")
+        .update(ticketToRow({ ...formattedUpdates, history: finalHistory }))
+        .eq("id", ticketId);
+      if (updateError) throw updateError;
       
       if (selectedTicket?.id === ticketId) {
         setSelectedTicket(prev => prev ? { 
@@ -1208,134 +1111,88 @@ export default function App() {
       }
       
       toast.success("Chamado atualizado!");
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `tickets/${ticketId}`);
+    } catch (error: any) {
+      console.error("Erro ao atualizar chamado:", error);
+      toast.error("Erro ao atualizar chamado: " + error.message);
     }
   };
 
   const handleDeleteTicket = async (ticketId: string) => {
     try {
-      await deleteDoc(doc(db, "tickets", ticketId));
+      const { error } = await supabase.from("tickets").delete().eq("id", ticketId);
+      if (error) throw error;
       toast.success("Chamado excluído com sucesso!");
       setIsModalOpen(false);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `tickets/${ticketId}`);
+    } catch (error: any) {
+      console.error("Erro ao excluir chamado:", error);
+      toast.error("Erro ao excluir chamado: " + error.message);
     }
   };
 
   const handleCreateCompany = async (companyData: Partial<Company>) => {
-    if (userProfile?.role !== 'superadmin') return;
+    if (userProfile?.role !== "superadmin") return;
     try {
-      const id = companyData.id?.toLowerCase().replace(/\s+/g, '-') || "";
-      await setDoc(doc(db, "companies", id), {
+      const id = companyData.id?.toLowerCase().replace(/\s+/g, "-") || "";
+      const { error } = await supabase.from("companies").insert({
         ...companyData,
         id,
-        createdAt: new Date().toISOString(),
+        created_at: new Date().toISOString(),
         active: true,
-        settings: {
-          webhookUrl: "",
-          nextTicketId: 2000
-        }
+        settings: { webhookUrl: "", nextTicketId: 2000 },
       });
+      if (error) throw error;
       toast.success("Empresa criada com sucesso!");
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, "companies");
+    } catch (error: any) {
+      console.error("Erro ao criar empresa:", error);
+      toast.error("Erro ao criar empresa: " + error.message);
     }
   };
 
   const handleUpdateCompany = async (id: string, data: Partial<Company>) => {
-    if (userProfile?.role !== 'superadmin') return;
+    if (userProfile?.role !== "superadmin") return;
     try {
-      await setDoc(doc(db, "companies", id), data, { merge: true });
+      const { error } = await supabase.from("companies").upsert({ id, ...data });
+      if (error) throw error;
       toast.success("Empresa atualizada com sucesso!");
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `companies/${id}`);
+    } catch (error: any) {
+      console.error("Erro ao atualizar empresa:", error);
+      toast.error("Erro ao atualizar empresa: " + error.message);
     }
   };
 
   const handleMigrateData = async () => {
-    if (userProfile?.role !== 'superadmin') {
-      toast.error("Apenas Super Admins podem migrar dados");
-      return;
-    }
-
-    const toastId = toast.loading("Iniciando migração de dados...");
-    setLoading(true);
-    try {
-      const defaultCompanyId = "itmanage";
-      
-      // 1. Create default company if not exists
-      const companyDoc = await getDoc(doc(db, "companies", defaultCompanyId));
-      if (!companyDoc.exists()) {
-        const globalSettingsSnap = await getDoc(doc(db, "settings", "global"));
-        const globalSettings = globalSettingsSnap.exists() ? globalSettingsSnap.data() : {};
-        
-        await setDoc(doc(db, "companies", defaultCompanyId), {
-          id: defaultCompanyId,
-          name: "ITMANAGE",
-          active: true,
-          createdAt: new Date().toISOString(),
-          settings: globalSettings
-        });
-      }
-
-      // 2. Migrate Tickets
-      const ticketsSnap = await getDocs(collection(db, "tickets"));
-      const ticketPromises = ticketsSnap.docs
-        .filter(d => !d.data().companyId)
-        .map(d => updateDoc(doc(db, "tickets", d.id), { companyId: defaultCompanyId }));
-      
-      // 3. Migrate Users
-      const usersSnap = await getDocs(collection(db, "users"));
-      const userPromises = usersSnap.docs
-        .filter(d => !d.data().companyId)
-        .map(d => updateDoc(doc(db, "users", d.id), { companyId: defaultCompanyId }));
-
-      // 4. Migrate Schedules
-      const schedulesSnap = await getDocs(collection(db, "schedules"));
-      const schedulePromises = schedulesSnap.docs
-        .filter(d => !d.data().companyId)
-        .map(d => updateDoc(doc(db, "schedules", d.id), { companyId: defaultCompanyId }));
-
-      // 5. Set default clients for itmanage
-      const itmanageClients = ["Avançar", "Bixnet", "Brasilink", "Iplay", "Jrnet", "Meconnect", "Nexo", "Prosseguir"];
-      const itmanageDoc = await getDoc(doc(db, "companies", "itmanage"));
-      if (itmanageDoc.exists()) {
-        await updateDoc(doc(db, "companies", "itmanage"), {
-          "settings.customClients": itmanageClients
-        });
-      }
-
-      await Promise.all([...ticketPromises, ...userPromises, ...schedulePromises]);
-      
-      toast.success("Migração concluída com sucesso!", { id: toastId });
-    } catch (error) {
-      console.error("Migration error:", error);
-      toast.error("Erro durante a migração", { id: toastId });
-    } finally {
-      setLoading(false);
-    }
+    // Função de migração do Firebase era one-time; no Supabase não é necessária
+    toast.success("Dados já migrados para o Supabase.");
   };
 
   const handleCreateSchedule = async (scheduleData: any) => {
     if (!currentCompanyId) return;
     try {
-      await addDoc(collection(db, "schedules"), {
-        ...scheduleData,
-        companyId: currentCompanyId
+      const id = Math.random().toString(36).substring(2, 15);
+      const { error } = await supabase.from("schedules").insert({
+        id,
+        company_id: currentCompanyId,
+        analyst: scheduleData.analyst,
+        date: scheduleData.date,
+        end_date: scheduleData.endDate || null,
+        shift: scheduleData.shift,
       });
+      if (error) throw error;
       toast.success("Agenda salva!");
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, "schedules");
+    } catch (error: any) {
+      console.error("Erro ao criar agenda:", error);
+      toast.error("Erro ao criar agenda: " + error.message);
     }
   };
 
   const handleDeleteSchedule = async (id: string) => {
     try {
-      await deleteDoc(doc(db, "schedules", id));
+      const { error } = await supabase.from("schedules").delete().eq("id", id);
+      if (error) throw error;
       toast.success("Agenda removida!");
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `schedules/${id}`);
+    } catch (error: any) {
+      console.error("Erro ao remover agenda:", error);
+      toast.error("Erro ao remover agenda: " + error.message);
     }
   };
 
@@ -1583,7 +1440,7 @@ export default function App() {
             Recarregar Página
           </button>
           <button
-            onClick={() => auth.signOut()}
+            onClick={() => supabase.auth.signOut()}
             className="w-full mt-4 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-900 dark:text-white font-bold py-4 rounded-2xl transition-all"
           >
             Sair da Conta
@@ -1622,7 +1479,7 @@ export default function App() {
             Seu Usuário ainda não foi liberado ao sistema.
           </p>
           <button 
-            onClick={() => auth.signOut()}
+            onClick={() => supabase.auth.signOut()}
             className="w-full bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-900 dark:text-white font-bold py-4 rounded-2xl transition-all"
           >
             Sair da Conta
