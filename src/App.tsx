@@ -432,13 +432,19 @@ export default function App() {
         setAuthError(null);
         loadProfile(session.user);
       } else {
-        setLoading(false);
+        // Não exibir login se há tokens OAuth no redirect — onAuthStateChange vai processar
+        const hasOAuthCallback =
+          window.location.hash.includes("access_token") ||
+          window.location.search.includes("code=");
+        if (!hasOAuthCallback) {
+          setLoading(false);
+        }
       }
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (_event, session) => {
-        console.log("Auth state changed:", session?.user?.email);
+        console.log("Auth state changed:", _event, session?.user?.email);
         if (session?.user) {
           setUser(session.user);
           setAuthError(null);
