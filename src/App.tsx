@@ -801,61 +801,54 @@ export default function App() {
 
     const toastId = toast.loading("Restaurando backup da empresa...");
     try {
-      const { data: backup } = await supabase.from("backups").select("*").eq("id", backupId).single();
-      if (!backup) {
-        toast.error("Backup não encontrado", { id: toastId });
-        return;
-      }
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
 
-      const companyId = backup.company_id;
+      const response = await fetch("/api/admin/restore-backup", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ backupId }),
+      });
 
-      // Deletar dados atuais
-      await Promise.all([
-        supabase.from("tickets").delete().eq("company_id", companyId),
-        supabase.from("profiles").delete().eq("company_id", companyId),
-        supabase.from("schedules").delete().eq("company_id", companyId),
-      ]);
-
-      // Restaurar tickets em lotes
-      const tickets = backup.tickets || [];
-      for (let i = 0; i < tickets.length; i += 400) {
-        await supabase.from("tickets").insert(tickets.slice(i, i + 400));
-      }
-
-      // Restaurar usuários
-      const users = backup.users || [];
-      for (let i = 0; i < users.length; i += 400) {
-        await supabase.from("profiles").upsert(users.slice(i, i + 400));
-      }
-
-      // Restaurar escalas
-      const schedules = backup.schedules || [];
-      for (let i = 0; i < schedules.length; i += 400) {
-        await supabase.from("schedules").insert(schedules.slice(i, i + 400));
-      }
-
-      // Restaurar configurações da empresa
-      if (backup.company) {
-        const { id, ...companyData } = backup.company;
-        await supabase.from("companies").upsert({ id, ...companyData });
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.message || "Erro ao restaurar backup");
       }
 
       toast.success("Empresa restaurada com sucesso! Recarregando...", { id: toastId });
       setTimeout(() => window.location.reload(), 2000);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Restore error:", error);
-      toast.error("Erro ao restaurar backup", { id: toastId });
+      toast.error("Erro ao restaurar backup: " + error.message, { id: toastId });
     }
   };
 
   const handleUpdateSettings = async (updates: Partial<AppSettings>) => {
     if (!currentCompanyId) return;
     try {
-      const { error } = await supabase
-        .from("companies")
-        .update({ settings: { ...settings, ...updates } })
-        .eq("id", currentCompanyId);
-      if (error) throw error;
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+
+      const response = await fetch("/api/admin/update-settings", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          companyId: currentCompanyId,
+          settings: { ...settings, ...updates },
+        }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.message || "Erro ao salvar configurações");
+      }
+
       toast.success("Configurações salvas!");
     } catch (error: any) {
       console.error("Erro ao salvar configurações:", error);
@@ -938,8 +931,19 @@ export default function App() {
 
   const handleDeleteUser = async (uid: string) => {
     try {
-      const { error } = await supabase.from("profiles").delete().eq("id", uid);
-      if (error) throw error;
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+
+      const response = await fetch(`/api/admin/delete-user/${uid}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.message || "Erro ao excluir usuário");
+      }
+
       toast.success("Usuário removido do sistema!");
       setUsersVersion(v => v + 1);
     } catch (error: any) {

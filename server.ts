@@ -647,6 +647,173 @@ async function startServer() {
     res.json({ message: "Usuário atualizado com sucesso" });
   });
 
+  app.delete("/api/admin/delete-user/:uid", async (req: any, res) => {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ message: "SUPABASE_SERVICE_ROLE_KEY não configurada no servidor." });
+    }
+
+    const authHeader = req.headers["authorization"];
+    const token = authHeader?.split(" ")[1];
+    if (!token) return res.sendStatus(401);
+
+    const { data: { user: caller }, error: authError } = await supabaseAdmin.auth.getUser(token);
+    if (authError || !caller) return res.sendStatus(403);
+
+    const { data: callerProfile } = await supabaseAdmin
+      .from("profiles")
+      .select("role")
+      .eq("id", caller.id)
+      .single();
+
+    if (!callerProfile || !["admin", "superadmin"].includes(callerProfile.role)) {
+      return res.sendStatus(403);
+    }
+
+    const { uid } = req.params;
+
+    // Deletar do Supabase Auth (cascata deleta profiles automaticamente)
+    const { error: authDeleteError } = await supabaseAdmin.auth.admin.deleteUser(uid);
+    if (authDeleteError) {
+      console.warn("Aviso: falha ao deletar do auth:", authDeleteError.message);
+    }
+
+    // Deletar de public.users também
+    const { error: usersError } = await supabaseAdmin.from("users").delete().eq("id", uid);
+    if (usersError) {
+      console.warn("Aviso: falha ao deletar de public.users:", usersError.message);
+    }
+
+    res.json({ message: "Usuário excluído com sucesso" });
+  });
+
+  app.put("/api/admin/update-settings", async (req: any, res) => {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ message: "SUPABASE_SERVICE_ROLE_KEY não configurada no servidor." });
+    }
+
+    const authHeader = req.headers["authorization"];
+    const token = authHeader?.split(" ")[1];
+    if (!token) return res.sendStatus(401);
+
+    const { data: { user: caller }, error: authError } = await supabaseAdmin.auth.getUser(token);
+    if (authError || !caller) return res.sendStatus(403);
+
+    const { data: callerProfile } = await supabaseAdmin
+      .from("profiles")
+      .select("role, company_id")
+      .eq("id", caller.id)
+      .single();
+
+    if (!callerProfile || !["admin", "superadmin"].includes(callerProfile.role)) {
+      return res.sendStatus(403);
+    }
+
+    const { companyId, settings } = req.body;
+    if (!companyId || !settings) {
+      return res.status(400).json({ message: "companyId e settings são obrigatórios." });
+    }
+
+    // Superadmin pode atualizar qualquer empresa; admin só a sua
+    if (callerProfile.role !== "superadmin" && callerProfile.company_id !== companyId) {
+      return res.sendStatus(403);
+    }
+
+    const { error } = await supabaseAdmin
+      .from("companies")
+      .update({ settings })
+      .eq("id", companyId);
+
+    if (error) {
+      return res.status(400).json({ message: error.message });
+    }
+
+    res.json({ message: "Configurações salvas" });
+  });
+
+  app.post("/api/admin/restore-backup", async (req: any, res) => {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ message: "SUPABASE_SERVICE_ROLE_KEY não configurada no servidor." });
+    }
+
+    const authHeader = req.headers["authorization"];
+    const token = authHeader?.split(" ")[1];
+    if (!token) return res.sendStatus(401);
+
+    const { data: { user: caller }, error: authError } = await supabaseAdmin.auth.getUser(token);
+    if (authError || !caller) return res.sendStatus(403);
+
+    const { data: callerProfile } = await supabaseAdmin
+      .from("profiles")
+      .select("role, company_id")
+      .eq("id", caller.id)
+      .single();
+
+    if (!callerProfile || !["admin", "superadmin"].includes(callerProfile.role)) {
+      return res.sendStatus(403);
+    }
+
+    const { backupId } = req.body;
+    if (!backupId) return res.status(400).json({ message: "backupId é obrigatório." });
+
+    const { data: backup, error: backupError } = await supabaseAdmin
+      .from("backups")
+      .select("*")
+      .eq("id", backupId)
+      .single();
+
+    if (backupError || !backup) {
+      return res.status(404).json({ message: "Backup não encontrado." });
+    }
+
+    const companyId = backup.company_id;
+
+    // Superadmin pode restaurar qualquer empresa; admin só a sua
+    if (callerProfile.role !== "superadmin" && callerProfile.company_id !== companyId) {
+      return res.sendStatus(403);
+    }
+
+    try {
+      // Deletar dados atuais (profiles cascateia para auth, mas aqui só limpamos as tabelas)
+      await Promise.all([
+        supabaseAdmin.from("tickets").delete().eq("company_id", companyId),
+        supabaseAdmin.from("profiles").delete().eq("company_id", companyId),
+        supabaseAdmin.from("users").delete().eq("company_id", companyId),
+        supabaseAdmin.from("schedules").delete().eq("company_id", companyId),
+      ]);
+
+      // Restaurar tickets em lotes
+      const tickets = backup.tickets || [];
+      for (let i = 0; i < tickets.length; i += 400) {
+        await supabaseAdmin.from("tickets").insert(tickets.slice(i, i + 400));
+      }
+
+      // Restaurar usuários em ambas as tabelas
+      const users = backup.users || [];
+      for (let i = 0; i < users.length; i += 400) {
+        const batch = users.slice(i, i + 400);
+        await supabaseAdmin.from("profiles").upsert(batch);
+        await supabaseAdmin.from("users").upsert(batch);
+      }
+
+      // Restaurar escalas em lotes
+      const schedules = backup.schedules || [];
+      for (let i = 0; i < schedules.length; i += 400) {
+        await supabaseAdmin.from("schedules").insert(schedules.slice(i, i + 400));
+      }
+
+      // Restaurar configurações da empresa
+      if (backup.company) {
+        const { id, ...companyData } = backup.company;
+        await supabaseAdmin.from("companies").upsert({ id, ...companyData });
+      }
+
+      res.json({ message: "Backup restaurado com sucesso" });
+    } catch (err: any) {
+      console.error("Erro ao restaurar backup:", err);
+      res.status(500).json({ message: err.message || "Erro interno ao restaurar backup" });
+    }
+  });
+
   // Webhook Proxy
   app.post("/api/webhook-proxy", async (req, res) => {
     const { url, data, method = 'POST', headers = {} } = req.body;
