@@ -905,11 +905,29 @@ export default function App() {
       if (updateData.associatedClient) {
         updateData.associatedClient = updateData.associatedClient.trim();
       }
-      const { error } = await supabase
-        .from("profiles")
-        .update(profileToRow(updateData))
-        .eq("id", uid);
-      if (error) throw error;
+
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+
+      const response = await fetch(`/api/admin/update-user/${uid}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          displayName: updateData.displayName,
+          role: updateData.role,
+          associatedClient: updateData.associatedClient ?? null,
+          companyId: updateData.companyId,
+        }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.message || "Erro ao atualizar usuário");
+      }
+
       toast.success("Usuário atualizado com sucesso!");
       setUsersVersion(v => v + 1);
     } catch (error: any) {

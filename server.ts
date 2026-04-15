@@ -454,34 +454,45 @@ async function startServer() {
     if (!token) return res.sendStatus(401);
 
     const { data: { user: caller }, error: authError } = await supabaseAdmin.auth.getUser(token);
-    if (authError || !caller) return res.sendStatus(403);
+    if (authError || !caller) {
+      console.error("[list-users] auth.getUser falhou:", authError?.message);
+      return res.sendStatus(403);
+    }
+
+    console.log("[list-users] caller:", caller.id, caller.email);
 
     // Verificar role em profiles primeiro, depois fallback para users
     let callerRole: string | null = null;
     let callerCompanyId: string | null = null;
 
-    const { data: callerProfile } = await supabaseAdmin
+    const { data: callerProfile, error: profileLookupError } = await supabaseAdmin
       .from("profiles")
       .select("role, company_id")
       .eq("id", caller.id)
       .single();
 
+    console.log("[list-users] profiles lookup:", callerProfile, profileLookupError?.message);
+
     if (callerProfile) {
       callerRole = callerProfile.role;
       callerCompanyId = callerProfile.company_id;
     } else {
-      const { data: callerUser } = await supabaseAdmin
+      const { data: callerUser, error: userLookupError } = await supabaseAdmin
         .from("users")
         .select("role, company_id")
         .eq("id", caller.id)
         .single();
+      console.log("[list-users] users lookup:", callerUser, userLookupError?.message);
       if (callerUser) {
         callerRole = callerUser.role;
         callerCompanyId = callerUser.company_id;
       }
     }
 
+    console.log("[list-users] callerRole:", callerRole);
+
     if (!callerRole || !["admin", "superadmin"].includes(callerRole)) {
+      console.error("[list-users] acesso negado - role:", callerRole);
       return res.sendStatus(403);
     }
 
@@ -577,6 +588,63 @@ async function startServer() {
     }
 
     res.status(201).json({ message: "Usuário criado com sucesso", uid: data.user.id });
+  });
+
+  app.put("/api/admin/update-user/:uid", async (req: any, res) => {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ message: "SUPABASE_SERVICE_ROLE_KEY não configurada no servidor." });
+    }
+
+    const authHeader = req.headers["authorization"];
+    const token = authHeader?.split(" ")[1];
+    if (!token) return res.sendStatus(401);
+
+    const { data: { user: caller }, error: authError } = await supabaseAdmin.auth.getUser(token);
+    if (authError || !caller) return res.sendStatus(403);
+
+    const { data: callerProfile } = await supabaseAdmin
+      .from("profiles")
+      .select("role")
+      .eq("id", caller.id)
+      .single();
+
+    if (!callerProfile || !["admin", "superadmin"].includes(callerProfile.role)) {
+      return res.sendStatus(403);
+    }
+
+    const { uid } = req.params;
+    const { displayName, role, associatedClient, companyId } = req.body;
+
+    const payload: Record<string, any> = {};
+    if (displayName !== undefined) payload.display_name = displayName;
+    if (role !== undefined)        payload.role = role;
+    if (associatedClient !== undefined) payload.associated_client = associatedClient ?? null;
+    if (companyId !== undefined)   payload.company_id = companyId ?? null;
+
+    if (Object.keys(payload).length === 0) {
+      return res.status(400).json({ message: "Nenhum campo para atualizar." });
+    }
+
+    const { error: profileError } = await supabaseAdmin
+      .from("profiles")
+      .update(payload)
+      .eq("id", uid);
+
+    if (profileError) {
+      return res.status(400).json({ message: profileError.message });
+    }
+
+    // Espelhar em public.users
+    const { error: usersError } = await supabaseAdmin
+      .from("users")
+      .update(payload)
+      .eq("id", uid);
+
+    if (usersError) {
+      console.warn("Aviso: falha ao atualizar em public.users:", usersError.message);
+    }
+
+    res.json({ message: "Usuário atualizado com sucesso" });
   });
 
   // Webhook Proxy
