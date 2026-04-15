@@ -64,6 +64,7 @@ export default function App() {
   });
   const [schedules, setSchedules] = useState<any[]>([]);
   const [users, setUsers] = useState<any[]>([]);
+  const [usersVersion, setUsersVersion] = useState(0);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [backups, setBackups] = useState<any[]>([]);
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
@@ -558,12 +559,17 @@ export default function App() {
     // ── Users (admin only) ───────────────────────────────
     if (userProfile.role === "admin" || userProfile.role === "superadmin") {
       const fetchUsers = async () => {
-        let q = supabase.from("profiles").select("*");
-        if (userProfile.role !== "superadmin" || selectedCompanyId) {
-          q = q.eq("company_id", companyId);
+        const { data: { session } } = await supabase.auth.getSession();
+        const token = session?.access_token;
+        if (!token) return;
+        const url = companyId ? `/api/admin/list-users?companyId=${encodeURIComponent(companyId)}` : "/api/admin/list-users";
+        const response = await fetch(url, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (response.ok) {
+          const data = await response.json();
+          setUsers(data.map(mapProfile));
         }
-        const { data } = await q;
-        setUsers((data || []).map(mapProfile));
       };
 
       fetchUsers();
@@ -611,7 +617,7 @@ export default function App() {
     return () => {
       channels.forEach(ch => supabase.removeChannel(ch));
     };
-  }, [user, userProfile, showArchived, currentCompanyId, selectedCompanyId]);
+  }, [user, userProfile, showArchived, currentCompanyId, selectedCompanyId, usersVersion]);
 
   const greeting = React.useMemo(() => {
     const hour = new Date().getHours();
@@ -886,6 +892,7 @@ export default function App() {
       }
 
       toast.success("Usuário criado com sucesso!");
+      setUsersVersion(v => v + 1);
     } catch (error: any) {
       console.error("Erro ao criar usuário:", error);
       toast.error("Erro ao criar usuário: " + error.message);
@@ -904,6 +911,7 @@ export default function App() {
         .eq("id", uid);
       if (error) throw error;
       toast.success("Usuário atualizado com sucesso!");
+      setUsersVersion(v => v + 1);
     } catch (error: any) {
       console.error("Erro ao atualizar usuário:", error);
       toast.error("Erro ao atualizar usuário: " + error.message);
@@ -915,6 +923,7 @@ export default function App() {
       const { error } = await supabase.from("profiles").delete().eq("id", uid);
       if (error) throw error;
       toast.success("Usuário removido do sistema!");
+      setUsersVersion(v => v + 1);
     } catch (error: any) {
       console.error("Erro ao excluir usuário:", error);
       toast.error("Erro ao excluir usuário: " + error.message);

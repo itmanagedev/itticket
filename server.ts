@@ -444,6 +444,41 @@ async function startServer() {
   });
 
   // ── Supabase Admin: criar usuário ───────────────────────────────────────
+  app.get("/api/admin/list-users", async (req: any, res) => {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ message: "SUPABASE_SERVICE_ROLE_KEY não configurada no servidor." });
+    }
+
+    const authHeader = req.headers["authorization"];
+    const token = authHeader?.split(" ")[1];
+    if (!token) return res.sendStatus(401);
+
+    const { data: { user: caller }, error: authError } = await supabaseAdmin.auth.getUser(token);
+    if (authError || !caller) return res.sendStatus(403);
+
+    const { data: callerProfile } = await supabaseAdmin
+      .from("profiles")
+      .select("role, company_id")
+      .eq("id", caller.id)
+      .single();
+
+    if (!callerProfile || !["admin", "superadmin"].includes(callerProfile.role)) {
+      return res.sendStatus(403);
+    }
+
+    const companyId = (req.query.companyId as string) || callerProfile.company_id;
+
+    let q = supabaseAdmin.from("profiles").select("*");
+    if (companyId) {
+      q = q.eq("company_id", companyId);
+    }
+
+    const { data, error } = await q;
+    if (error) return res.status(500).json({ message: error.message });
+
+    res.json(data || []);
+  });
+
   app.post("/api/admin/create-user", async (req: any, res) => {
     if (!supabaseAdmin) {
       return res.status(503).json({ message: "SUPABASE_SERVICE_ROLE_KEY não configurada no servidor." });
