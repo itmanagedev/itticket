@@ -443,7 +443,7 @@ async function startServer() {
     res.json({ message: "Escala excluída" });
   });
 
-  // ── Supabase Admin: criar usuário ───────────────────────────────────────
+  // ── Supabase Admin: listar usuários ─────────────────────────────────────
   app.get("/api/admin/list-users", async (req: any, res) => {
     if (!supabaseAdmin) {
       return res.status(503).json({ message: "SUPABASE_SERVICE_ROLE_KEY não configurada no servidor." });
@@ -456,27 +456,62 @@ async function startServer() {
     const { data: { user: caller }, error: authError } = await supabaseAdmin.auth.getUser(token);
     if (authError || !caller) return res.sendStatus(403);
 
+    // Verificar role em profiles primeiro, depois fallback para users
+    let callerRole: string | null = null;
+    let callerCompanyId: string | null = null;
+
     const { data: callerProfile } = await supabaseAdmin
       .from("profiles")
       .select("role, company_id")
       .eq("id", caller.id)
       .single();
 
-    if (!callerProfile || !["admin", "superadmin"].includes(callerProfile.role)) {
+    if (callerProfile) {
+      callerRole = callerProfile.role;
+      callerCompanyId = callerProfile.company_id;
+    } else {
+      const { data: callerUser } = await supabaseAdmin
+        .from("users")
+        .select("role, company_id")
+        .eq("id", caller.id)
+        .single();
+      if (callerUser) {
+        callerRole = callerUser.role;
+        callerCompanyId = callerUser.company_id;
+      }
+    }
+
+    if (!callerRole || !["admin", "superadmin"].includes(callerRole)) {
       return res.sendStatus(403);
     }
 
-    const companyId = (req.query.companyId as string) || callerProfile.company_id;
+    const companyId = (req.query.companyId as string) || callerCompanyId;
 
-    let q = supabaseAdmin.from("profiles").select("*");
+    // Buscar em profiles; completar com users caso faltem registros
+    let q = supabaseAdmin.from("users").select("*");
     if (companyId) {
       q = q.eq("company_id", companyId);
     }
 
-    const { data, error } = await q;
-    if (error) return res.status(500).json({ message: error.message });
+    const { data: usersData, error: usersError } = await q;
 
-    res.json(data || []);
+    let q2 = supabaseAdmin.from("profiles").select("*");
+    if (companyId) {
+      q2 = q2.eq("company_id", companyId);
+    }
+    const { data: profilesData } = await q2;
+
+    if (usersError && !profilesData) {
+      return res.status(500).json({ message: usersError.message });
+    }
+
+    // Mesclar: priorizar users, complementar com profiles não presentes
+    const usersMap = new Map((usersData || []).map((u: any) => [u.id, u]));
+    for (const p of (profilesData || [])) {
+      if (!usersMap.has(p.id)) usersMap.set(p.id, p);
+    }
+
+    res.json(Array.from(usersMap.values()));
   });
 
   app.post("/api/admin/create-user", async (req: any, res) => {
@@ -520,18 +555,25 @@ async function startServer() {
       return res.status(400).json({ message: createError.message });
     }
 
-    // Criar perfil na tabela profiles
-    const { error: profileError } = await supabaseAdmin.from("profiles").insert({
+    const userPayload = {
       id: data.user.id,
       email,
       display_name: displayName,
       role: role || "pending",
       company_id: companyId || null,
       associated_client: associatedClient || null,
-    });
+    };
 
+    // Criar perfil na tabela profiles
+    const { error: profileError } = await supabaseAdmin.from("profiles").insert(userPayload);
     if (profileError) {
       return res.status(400).json({ message: profileError.message });
+    }
+
+    // Espelhar em public.users
+    const { error: usersError } = await supabaseAdmin.from("users").insert(userPayload);
+    if (usersError) {
+      console.warn("Aviso: falha ao inserir em public.users:", usersError.message);
     }
 
     res.status(201).json({ message: "Usuário criado com sucesso", uid: data.user.id });
