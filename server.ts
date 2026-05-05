@@ -19,6 +19,17 @@ const supabaseAdmin = (() => {
   return createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
 })();
 
+const DEFAULT_COMPANY_ID = "itmanage";
+const BOOTSTRAP_SUPERADMINS = new Set(["nairtonbraga00@gmail.com"]);
+
+function normalizeEmail(email?: string | null) {
+  return (email || "").trim().toLowerCase();
+}
+
+function isBootstrapSuperadmin(email?: string | null) {
+  return BOOTSTRAP_SUPERADMINS.has(normalizeEmail(email));
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -158,6 +169,25 @@ async function startServer() {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
   });
 
+  const ensureDefaultCompany = async () => {
+    if (!supabaseAdmin) return;
+
+    const defaultCompany = {
+      id: DEFAULT_COMPANY_ID,
+      name: "IT Manage",
+      active: true,
+      settings: { webhookUrl: "", customClients: [], customCategories: [] },
+    };
+
+    const { error } = await supabaseAdmin
+      .from("companies")
+      .upsert(defaultCompany, { onConflict: "id" });
+
+    if (error) {
+      throw new Error(`Erro ao garantir empresa padrão: ${error.message}`);
+    }
+  };
+
   // Auth Middleware
   const authenticateToken = (req: any, res: any, next: any) => {
     const authHeader = req.headers['authorization'];
@@ -232,6 +262,68 @@ async function startServer() {
     } catch (error) {
       res.status(400).json({ message: "Erro ao criar usuário. E-mail já existe?" });
     }
+  });
+
+  app.post("/api/auth/sync-profile", async (req: any, res) => {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ message: "SUPABASE_SERVICE_ROLE_KEY não configurada no servidor." });
+    }
+
+    const authHeader = req.headers["authorization"];
+    const token = authHeader?.split(" ")[1];
+    if (!token) return res.sendStatus(401);
+
+    const { data: { user: authUser }, error: authError } = await supabaseAdmin.auth.getUser(token);
+    if (authError || !authUser) return res.sendStatus(403);
+
+    const { data: existingProfile, error: profileLookupError } = await supabaseAdmin
+      .from("profiles")
+      .select("*")
+      .eq("id", authUser.id)
+      .maybeSingle();
+
+    if (profileLookupError) {
+      return res.status(400).json({ message: profileLookupError.message });
+    }
+
+    const forcedSuperadmin = isBootstrapSuperadmin(authUser.email);
+    const companyId = existingProfile?.company_id || DEFAULT_COMPANY_ID;
+
+    if (companyId === DEFAULT_COMPANY_ID) {
+      await ensureDefaultCompany();
+    }
+
+    const profilePayload = {
+      id: authUser.id,
+      company_id: companyId,
+      email: authUser.email || existingProfile?.email || "",
+      display_name:
+        existingProfile?.display_name ||
+        authUser.user_metadata?.full_name ||
+        authUser.user_metadata?.name ||
+        authUser.email?.split("@")[0] ||
+        "Usuário",
+      role: forcedSuperadmin ? "superadmin" : existingProfile?.role || "pending",
+      associated_client: existingProfile?.associated_client ?? null,
+    };
+
+    const { data: savedProfile, error: upsertError } = await supabaseAdmin
+      .from("profiles")
+      .upsert(profilePayload, { onConflict: "id" })
+      .select("*")
+      .single();
+
+    if (upsertError) {
+      return res.status(400).json({ message: upsertError.message });
+    }
+
+    const { data: companyRow } = await supabaseAdmin
+      .from("companies")
+      .select("*")
+      .eq("id", profilePayload.company_id)
+      .maybeSingle();
+
+    res.json({ profile: savedProfile, company: companyRow || null });
   });
 
   app.get("/api/users", authenticateToken, (req: any, res) => {

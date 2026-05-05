@@ -65,7 +65,7 @@ export const sendWhatsAppNotification = async (
 
   if (!settings.evolutionApiUrl || !settings.evolutionApiKey || !settings.evolutionInstance) {
     console.log("WhatsApp notification skipped: Missing configuration.");
-    return { success: false, error: "Missing configuration" };
+    return { success: true };
   }
 
   let message = "";

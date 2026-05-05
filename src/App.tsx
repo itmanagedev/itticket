@@ -43,6 +43,20 @@ import { getFirestoreDate } from "./utils/dateUtils";
 import { supabase } from "./utils/supabase";
 import { mapTicket, ticketToRow, mapProfile, profileToRow, mapCompany, mapSchedule } from "./utils/mappers";
 
+const isBootstrapSuperadmin = (email?: string | null) =>
+  email?.trim().toLowerCase() === "nairtonbraga00@gmail.com";
+
+const hasMissingTicketColumnError = (error: any, columnName: string) =>
+  typeof error?.message === "string" &&
+  error.message.includes(`'${columnName}'`) &&
+  error.message.toLowerCase().includes("schema cache");
+
+const removeUnsupportedTicketColumns = (row: Record<string, unknown>) => {
+  const sanitizedRow = { ...row };
+  delete sanitizedRow.in_progress_since;
+  return sanitizedRow;
+};
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<ClientName | "dashboard" | "reports" | "settings" | "schedule">("dashboard");
   const [tickets, setTickets] = useState<Ticket[]>([]);
@@ -351,7 +365,67 @@ export default function App() {
   useEffect(() => {
     console.log("Setting up Supabase Auth observer...");
 
+    const applyProfileRow = async (profileRow: any, companyRow?: any) => {
+      const profile = mapProfile(profileRow);
+      setUserProfile(profile);
+
+      if (companyRow) {
+        setCompany(mapCompany(companyRow));
+        setLoading(false);
+        return;
+      }
+
+      if (profile.companyId) {
+        const { data: fetchedCompanyRow } = await supabase
+          .from("companies")
+          .select("*")
+          .eq("id", profile.companyId)
+          .single();
+        if (fetchedCompanyRow) {
+          setCompany(mapCompany(fetchedCompanyRow));
+        }
+      } else {
+        setCompany(null);
+      }
+
+      setLoading(false);
+    };
+
+    const syncProfileWithServer = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) return null;
+
+      const response = await fetch("/api/auth/sync-profile", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (!response.ok) {
+        let message = "Falha ao sincronizar perfil.";
+        try {
+          const payload = await response.json();
+          if (payload?.message) message = payload.message;
+        } catch {
+          // Ignore malformed JSON and keep a generic fallback message.
+        }
+        throw new Error(message);
+      }
+
+      return response.json();
+    };
+
     const loadProfile = async (authUser: any) => {
+      try {
+        const syncResult = await syncProfileWithServer();
+        if (syncResult?.profile) {
+          await applyProfileRow(syncResult.profile, syncResult.company);
+          return;
+        }
+      } catch (syncError: any) {
+        console.warn("Profile sync fallback:", syncError?.message || syncError);
+      }
+
       const { data: profileRow, error } = await supabase
         .from("profiles")
         .select("*")
@@ -359,21 +433,7 @@ export default function App() {
         .single();
 
       if (profileRow) {
-        let profile = mapProfile(profileRow);
-        if (authUser.email?.toLowerCase() === "nairtonbraga00@gmail.com") {
-          profile.role = "superadmin";
-        }
-        setUserProfile(profile);
-
-        if (profile.companyId) {
-          const { data: companyRow } = await supabase
-            .from("companies")
-            .select("*")
-            .eq("id", profile.companyId)
-            .single();
-          if (companyRow) setCompany(mapCompany(companyRow));
-        }
-        setLoading(false);
+        await applyProfileRow(profileRow);
       } else if (error?.code === "PGRST116" || error?.code === "PGRST205" || error?.details?.includes("0 rows")) {
         // Perfil não existe — criar
         console.log("Perfil não existe, criando...");
@@ -407,7 +467,7 @@ export default function App() {
               authUser.email?.split("@")[0] ||
               "Usuário",
             role:
-              authUser.email?.toLowerCase() === "nairtonbraga00@gmail.com"
+              isBootstrapSuperadmin(authUser.email)
                 ? "superadmin"
                 : "pending",
           };
@@ -991,7 +1051,13 @@ export default function App() {
         formattedData.inProgressSince = now;
       }
 
-      const { error: insertError } = await supabase.from("tickets").insert(ticketToRow(formattedData));
+      const ticketRow = ticketToRow(formattedData);
+      let { error: insertError } = await supabase.from("tickets").insert(ticketRow);
+      if (hasMissingTicketColumnError(insertError, "in_progress_since")) {
+        ({ error: insertError } = await supabase
+          .from("tickets")
+          .insert(removeUnsupportedTicketColumns(ticketRow)));
+      }
       if (insertError) throw insertError;
 
       // Enviar notificações em segundo plano
@@ -1107,10 +1173,17 @@ export default function App() {
 
       const finalHistory = [...(originalTicket?.history || []), ...historyEntries];
 
-      const { error: updateError } = await supabase
+      const ticketRow = ticketToRow({ ...formattedUpdates, history: finalHistory });
+      let { error: updateError } = await supabase
         .from("tickets")
-        .update(ticketToRow({ ...formattedUpdates, history: finalHistory }))
+        .update(ticketRow)
         .eq("id", ticketId);
+      if (hasMissingTicketColumnError(updateError, "in_progress_since")) {
+        ({ error: updateError } = await supabase
+          .from("tickets")
+          .update(removeUnsupportedTicketColumns(ticketRow))
+          .eq("id", ticketId));
+      }
       if (updateError) throw updateError;
       
       if (selectedTicket?.id === ticketId) {

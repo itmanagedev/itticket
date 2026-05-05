@@ -55,6 +55,19 @@ create table if not exists public.tickets (
   total_hours      float default 0,
   billed_hours     float default 0
 );
+-- Garantir colunas mesmo se a tabela já existia
+alter table public.tickets add column if not exists company_id         text references public.companies(id);
+alter table public.tickets add column if not exists priority           text;
+alter table public.tickets add column if not exists updates            jsonb default '[]'::jsonb;
+alter table public.tickets add column if not exists attachments        jsonb default '[]'::jsonb;
+alter table public.tickets add column if not exists history            jsonb default '[]'::jsonb;
+alter table public.tickets add column if not exists archived           integer default 0;
+alter table public.tickets add column if not exists sla_notified       boolean default false;
+alter table public.tickets add column if not exists sla_notified_at    timestamptz;
+alter table public.tickets add column if not exists in_progress_since  timestamptz;
+alter table public.tickets add column if not exists is_important       boolean default false;
+alter table public.tickets add column if not exists total_hours        float default 0;
+alter table public.tickets add column if not exists billed_hours       float default 0;
 
 create table if not exists public.schedules (
   id          text primary key,
