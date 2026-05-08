@@ -273,6 +273,8 @@ export default function TicketModal({ isOpen, onClose, ticket, onCreate, onUpdat
   };
 
   const responsiblesForClient = clientResponsibles?.[client] || [];
+  const allResponsibles = [...new Set(Object.values(clientResponsibles || {}).flat())].sort((a, b) => a.localeCompare(b));
+  const responsibleOptions = responsiblesForClient.length > 0 ? [...responsiblesForClient].sort((a, b) => a.localeCompare(b)) : allResponsibles;
 
   if (!isOpen) return null;
 
@@ -571,7 +573,7 @@ export default function TicketModal({ isOpen, onClose, ticket, onCreate, onUpdat
                             }`}
                           >
                             <option value="">Selecionar...</option>
-                            {[...(clientResponsibles?.[client] || [])].sort((a, b) => a.localeCompare(b)).map(r => <option key={r} value={r}>{r}</option>)}
+                            {responsibleOptions.map(r => <option key={r} value={r}>{r}</option>)}
                           </select>
                           <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 pointer-events-none group-hover:text-zinc-600 transition-colors" />
                         </div>

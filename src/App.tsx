@@ -2198,7 +2198,7 @@ export default function App() {
             onUpdate={handleUpdateTicket}
             onDelete={handleDeleteTicket}
             user={userProfile}
-            activeClient={activeTab !== "dashboard" && activeTab !== "reports" && activeTab !== "settings" ? activeTab : undefined}
+            activeClient={!["dashboard", "reports", "settings", "schedule"].includes(activeTab) ? activeTab : undefined}
             clientResponsibles={settings.clientResponsibles}
             allClients={visibleClients}
             allCategories={allCategories}
