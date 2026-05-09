@@ -2203,6 +2203,7 @@ export default function App() {
             allClients={visibleClients}
             allCategories={allCategories}
             settings={settings}
+            users={users}
           />
         )}
       </AnimatePresence>

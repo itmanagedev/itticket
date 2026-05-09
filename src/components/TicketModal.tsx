@@ -4,7 +4,7 @@ import { X, Send, User as UserIcon, Clock, CheckCircle2, AlertCircle, MessageSqu
 import DatePicker, { registerLocale } from "react-datepicker";
 import "react-datepicker/dist/react-datepicker.css";
 import { ptBR } from "date-fns/locale";
-import { Ticket, TicketStatus, ClientName, TicketUpdate, TicketAttachment, TicketCategory, TicketPriority, AppSettings } from "../types";
+import { Ticket, TicketStatus, ClientName, TicketUpdate, TicketAttachment, TicketCategory, TicketPriority, AppSettings, UserProfile } from "../types";
 registerLocale("pt-BR", ptBR);
 import { CLIENTS, STATUSES, STATUS_COLORS, STATUS_TEXT_COLORS, CATEGORIES, PRIORITIES } from "../constants";
 import { formatFirestoreDate, getTimeOpen, formatHoursToHMin } from "../utils/dateUtils";
@@ -23,9 +23,10 @@ interface TicketModalProps {
   allClients?: string[];
   allCategories?: string[];
   settings: AppSettings;
+  users?: UserProfile[];
 }
 
-export default function TicketModal({ isOpen, onClose, ticket, onCreate, onUpdate, onDelete, user, activeClient, clientResponsibles, allClients = [], allCategories = [], settings }: TicketModalProps) {
+export default function TicketModal({ isOpen, onClose, ticket, onCreate, onUpdate, onDelete, user, activeClient, clientResponsibles, allClients = [], allCategories = [], settings, users = [] }: TicketModalProps) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [client, setClient] = useState<ClientName>(activeClient || (allClients[0] || CLIENTS[0]));
@@ -272,9 +273,18 @@ export default function TicketModal({ isOpen, onClose, ticket, onCreate, onUpdat
     setAttachments(prev => prev.filter((_, i) => i !== index));
   };
 
+  const systemUsers = users
+    .filter(u => u.role !== "client" && u.role !== "pending")
+    .map(u => u.displayName)
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
   const responsiblesForClient = clientResponsibles?.[client] || [];
-  const allResponsibles = [...new Set(Object.values(clientResponsibles || {}).flat())].sort((a, b) => a.localeCompare(b));
-  const responsibleOptions = responsiblesForClient.length > 0 ? [...responsiblesForClient].sort((a, b) => a.localeCompare(b)) : allResponsibles;
+  const allResponsiblesFromSettings = [...new Set(Object.values(clientResponsibles || {}).flat())].sort((a, b) => a.localeCompare(b));
+  const responsibleOptions = systemUsers.length > 0
+    ? systemUsers
+    : responsiblesForClient.length > 0
+      ? [...responsiblesForClient].sort((a, b) => a.localeCompare(b))
+      : allResponsiblesFromSettings;
 
   if (!isOpen) return null;
 
