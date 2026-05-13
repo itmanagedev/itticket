@@ -120,22 +120,45 @@ export default function SettingsView({
     return [];
   };
 
+  const prevSettingsRef = React.useRef<AppSettings>(settings);
+
   useEffect(() => {
-    setWebhookUrl(settings.webhookUrl || "");
-    setWebhookEnabled(settings.webhookEnabled ?? true);
-    setEvolutionApiUrl(settings.evolutionApiUrl || "");
-    setEvolutionApiKey(settings.evolutionApiKey || "");
-    setEvolutionInstance(settings.evolutionInstance || "");
-    setWhatsappEnabled(settings.whatsappEnabled ?? true);
-    setWhatsappClientsList(settings.whatsappClientsList || []);
-    setWhatsappResponsiblesList(settings.whatsappResponsiblesList || []);
-    setWhatsappClientMappings(settings.whatsappClientMappings || {});
-    setWhatsappResponsibleMappings(settings.whatsappResponsibleMappings || {});
-    setClientLogos(settings.clientLogos || {});
-    setClientResponsibles(settings.clientResponsibles || {});
-    setCustomClients(settings.customClients || []);
-    setCustomCategories(settings.customCategories || []);
-    setStatusColors(settings.statusColors || {});
+    const prev = prevSettingsRef.current;
+    prevSettingsRef.current = settings;
+
+    // Só atualiza cada campo se o valor no banco mudou.
+    // Isso evita apagar o que o usuário está digitando quando o Realtime
+    // dispara fetchCompany sem ter alterado esses campos.
+    if (prev.webhookUrl !== settings.webhookUrl)
+      setWebhookUrl(settings.webhookUrl || "");
+    if (prev.webhookEnabled !== settings.webhookEnabled)
+      setWebhookEnabled(settings.webhookEnabled ?? true);
+    if (prev.evolutionApiUrl !== settings.evolutionApiUrl)
+      setEvolutionApiUrl(settings.evolutionApiUrl || "");
+    if (prev.evolutionApiKey !== settings.evolutionApiKey)
+      setEvolutionApiKey(settings.evolutionApiKey || "");
+    if (prev.evolutionInstance !== settings.evolutionInstance)
+      setEvolutionInstance(settings.evolutionInstance || "");
+    if (prev.whatsappEnabled !== settings.whatsappEnabled)
+      setWhatsappEnabled(settings.whatsappEnabled ?? true);
+    if (JSON.stringify(prev.whatsappClientsList) !== JSON.stringify(settings.whatsappClientsList))
+      setWhatsappClientsList(settings.whatsappClientsList || []);
+    if (JSON.stringify(prev.whatsappResponsiblesList) !== JSON.stringify(settings.whatsappResponsiblesList))
+      setWhatsappResponsiblesList(settings.whatsappResponsiblesList || []);
+    if (JSON.stringify(prev.whatsappClientMappings) !== JSON.stringify(settings.whatsappClientMappings))
+      setWhatsappClientMappings(settings.whatsappClientMappings || {});
+    if (JSON.stringify(prev.whatsappResponsibleMappings) !== JSON.stringify(settings.whatsappResponsibleMappings))
+      setWhatsappResponsibleMappings(settings.whatsappResponsibleMappings || {});
+    if (JSON.stringify(prev.clientLogos) !== JSON.stringify(settings.clientLogos))
+      setClientLogos(settings.clientLogos || {});
+    if (JSON.stringify(prev.clientResponsibles) !== JSON.stringify(settings.clientResponsibles))
+      setClientResponsibles(settings.clientResponsibles || {});
+    if (JSON.stringify(prev.customClients) !== JSON.stringify(settings.customClients))
+      setCustomClients(settings.customClients || []);
+    if (JSON.stringify(prev.customCategories) !== JSON.stringify(settings.customCategories))
+      setCustomCategories(settings.customCategories || []);
+    if (JSON.stringify(prev.statusColors) !== JSON.stringify(settings.statusColors))
+      setStatusColors(settings.statusColors || {});
   }, [settings]);
 
   useEffect(() => {
