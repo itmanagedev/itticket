@@ -280,11 +280,15 @@ export default function TicketModal({ isOpen, onClose, ticket, onCreate, onUpdat
     .sort((a, b) => a.localeCompare(b));
   const responsiblesForClient = clientResponsibles?.[client] || [];
   const allResponsiblesFromSettings = [...new Set(Object.values(clientResponsibles || {}).flat())].sort((a, b) => a.localeCompare(b));
-  const responsibleOptions = systemUsers.length > 0
+  const baseOptions = systemUsers.length > 0
     ? systemUsers
     : responsiblesForClient.length > 0
       ? [...responsiblesForClient].sort((a, b) => a.localeCompare(b))
       : allResponsiblesFromSettings;
+  // Garante que o responsável atual sempre aparece na lista (evita select em branco ao editar)
+  const responsibleOptions = responsible && !baseOptions.includes(responsible)
+    ? [...baseOptions, responsible].sort((a, b) => a.localeCompare(b))
+    : baseOptions;
 
   if (!isOpen) return null;
 

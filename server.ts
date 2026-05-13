@@ -810,10 +810,15 @@ async function startServer() {
       return res.sendStatus(403);
     }
 
-    const { error } = await supabaseAdmin
-      .from("companies")
-      .update({ settings })
-      .eq("id", companyId);
+    // Remove campos gerenciados pelo banco (nextTicketId é gerenciado por get_next_ticket_id,
+    // lastSlaCheckDate é gerenciado pelo monitor de SLA) para não sobrescrever com valor desatualizado
+    const { nextTicketId, ticketCounter, lastSlaCheckDate, ...userSettings } = settings;
+
+    // Usa merge JSONB (||) em vez de replace total para preservar campos do banco
+    const { error } = await supabaseAdmin.rpc("merge_company_settings", {
+      p_company_id: companyId,
+      p_settings: userSettings,
+    });
 
     if (error) {
       return res.status(400).json({ message: error.message });

@@ -147,6 +147,21 @@ end;
 $$;
 
 -- -----------------------------------------------
+-- FUNÇÃO: merge de settings (preserva nextTicketId e outros campos do banco)
+-- -----------------------------------------------
+
+create or replace function public.merge_company_settings(p_company_id text, p_settings jsonb)
+returns void
+language sql
+security definer
+set search_path = public
+as $$
+  update companies
+  set settings = coalesce(settings, '{}'::jsonb) || p_settings
+  where id = p_company_id;
+$$;
+
+-- -----------------------------------------------
 -- HABILITAR RLS
 -- -----------------------------------------------
 

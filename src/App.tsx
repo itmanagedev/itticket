@@ -370,7 +370,20 @@ export default function App() {
       setUserProfile(profile);
 
       if (companyRow) {
-        setCompany(mapCompany(companyRow));
+        const mappedCompany = mapCompany(companyRow);
+        setCompany(mappedCompany);
+        const s = (mappedCompany.settings || {}) as Partial<AppSettings>;
+        setSettings(prev => ({
+          ...prev,
+          ...s,
+          whatsappClientsList: s.whatsappClientsList || [],
+          whatsappResponsiblesList: s.whatsappResponsiblesList || [],
+          clientLogos: s.clientLogos || {},
+          clientResponsibles: s.clientResponsibles || {},
+          customClients: s.customClients || [],
+          customCategories: s.customCategories || [],
+          disabledSlaClients: s.disabledSlaClients || [],
+        }));
         setLoading(false);
         return;
       }
@@ -889,6 +902,7 @@ export default function App() {
   const handleUpdateSettings = async (updates: Partial<AppSettings>) => {
     if (!currentCompanyId) return;
     try {
+      const newSettings = { ...settings, ...updates };
       const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token;
 
@@ -900,7 +914,7 @@ export default function App() {
         },
         body: JSON.stringify({
           companyId: currentCompanyId,
-          settings: { ...settings, ...updates },
+          settings: newSettings,
         }),
       });
 
@@ -909,6 +923,7 @@ export default function App() {
         throw new Error(err.message || "Erro ao salvar configurações");
       }
 
+      setSettings(prev => ({ ...prev, ...updates }));
       toast.success("Configurações salvas!");
     } catch (error: any) {
       console.error("Erro ao salvar configurações:", error);
