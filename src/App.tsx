@@ -367,7 +367,14 @@ export default function App() {
 
     const applyProfileRow = async (profileRow: any, companyRow?: any) => {
       const profile = mapProfile(profileRow);
-      setUserProfile(profile);
+      // Evita recriar objeto userProfile com mesmos dados (evita re-render desnecessário)
+      setUserProfile(prev =>
+        prev?.uid === profile.uid &&
+        prev?.role === profile.role &&
+        prev?.companyId === profile.companyId
+          ? prev
+          : profile
+      );
 
       if (companyRow) {
         const mappedCompany = mapCompany(companyRow);
@@ -530,12 +537,15 @@ export default function App() {
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (_event, session) => {
-        console.log("Auth state changed:", _event, session?.user?.email);
+      async (event, session) => {
         if (session?.user) {
           setUser(session.user);
           setAuthError(null);
-          loadProfile(session.user);
+          // TOKEN_REFRESHED só renova o token — não recarrega perfil nem
+          // reinicia as subscriptions para evitar o "reload" constante da tela
+          if (event !== "TOKEN_REFRESHED") {
+            loadProfile(session.user);
+          }
         } else {
           setUser(null);
           setUserProfile(null);
