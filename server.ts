@@ -179,9 +179,10 @@ async function startServer() {
       settings: { webhookUrl: "", customClients: [], customCategories: [] },
     };
 
+    // ignoreDuplicates: true → só insere se não existir; nunca sobrescreve settings salvos
     const { error } = await supabaseAdmin
       .from("companies")
-      .upsert(defaultCompany, { onConflict: "id" });
+      .upsert(defaultCompany, { onConflict: "id", ignoreDuplicates: true });
 
     if (error) {
       throw new Error(`Erro ao garantir empresa padrão: ${error.message}`);
