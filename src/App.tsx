@@ -395,7 +395,20 @@ export default function App() {
           .eq("id", profile.companyId)
           .single();
         if (fetchedCompanyRow) {
-          setCompany(mapCompany(fetchedCompanyRow));
+          const mappedCompany = mapCompany(fetchedCompanyRow);
+          setCompany(mappedCompany);
+          const s = (mappedCompany.settings || {}) as Partial<AppSettings>;
+          setSettings(prev => ({
+            ...prev,
+            ...s,
+            whatsappClientsList: s.whatsappClientsList || [],
+            whatsappResponsiblesList: s.whatsappResponsiblesList || [],
+            clientLogos: s.clientLogos || {},
+            clientResponsibles: s.clientResponsibles || {},
+            customClients: s.customClients || [],
+            customCategories: s.customCategories || [],
+            disabledSlaClients: s.disabledSlaClients || [],
+          }));
         }
       } else {
         setCompany(null);

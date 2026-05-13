@@ -810,15 +810,35 @@ async function startServer() {
       return res.sendStatus(403);
     }
 
-    // Remove campos gerenciados pelo banco (nextTicketId é gerenciado por get_next_ticket_id,
-    // lastSlaCheckDate é gerenciado pelo monitor de SLA) para não sobrescrever com valor desatualizado
+    // Lê as settings atuais do banco para preservar campos gerenciados internamente
+    const { data: currentCompany, error: readError } = await supabaseAdmin
+      .from("companies")
+      .select("settings")
+      .eq("id", companyId)
+      .single();
+
+    if (readError) {
+      return res.status(400).json({ message: readError.message });
+    }
+
+    const dbSettings: Record<string, any> = currentCompany?.settings || {};
+
+    // Remove campos gerenciados pelo banco antes de fazer o merge
     const { nextTicketId, ticketCounter, lastSlaCheckDate, ...userSettings } = settings;
 
-    // Usa merge JSONB (||) em vez de replace total para preservar campos do banco
-    const { error } = await supabaseAdmin.rpc("merge_company_settings", {
-      p_company_id: companyId,
-      p_settings: userSettings,
-    });
+    // Merge: DB settings base + novos settings do usuário
+    // Campos do banco (nextTicketId, lastSlaCheckDate) são sempre preservados
+    const mergedSettings = {
+      ...dbSettings,
+      ...userSettings,
+      ...(dbSettings.nextTicketId !== undefined   ? { nextTicketId: dbSettings.nextTicketId }   : {}),
+      ...(dbSettings.lastSlaCheckDate !== undefined ? { lastSlaCheckDate: dbSettings.lastSlaCheckDate } : {}),
+    };
+
+    const { error } = await supabaseAdmin
+      .from("companies")
+      .update({ settings: mergedSettings })
+      .eq("id", companyId);
 
     if (error) {
       return res.status(400).json({ message: error.message });
