@@ -925,10 +925,11 @@ export default function App() {
   const handleUpdateSettings = async (updates: Partial<AppSettings>) => {
     if (!currentCompanyId) return;
     try {
-      const newSettings = { ...settings, ...updates };
       const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token;
 
+      // Envia apenas os campos que mudaram (updates), não o estado completo.
+      // Isso evita sobrescrever no banco campos que o usuário ainda não salvou.
       const response = await fetch("/api/admin/update-settings", {
         method: "PUT",
         headers: {
@@ -937,7 +938,7 @@ export default function App() {
         },
         body: JSON.stringify({
           companyId: currentCompanyId,
-          settings: newSettings,
+          updates,
         }),
       });
 

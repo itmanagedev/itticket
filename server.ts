@@ -800,9 +800,9 @@ async function startServer() {
       return res.sendStatus(403);
     }
 
-    const { companyId, settings } = req.body;
-    if (!companyId || !settings) {
-      return res.status(400).json({ message: "companyId e settings são obrigatórios." });
+    const { companyId, updates } = req.body;
+    if (!companyId || !updates) {
+      return res.status(400).json({ message: "companyId e updates são obrigatórios." });
     }
 
     // Superadmin pode atualizar qualquer empresa; admin só a sua
@@ -824,13 +824,13 @@ async function startServer() {
     const dbSettings: Record<string, any> = currentCompany?.settings || {};
 
     // Remove campos gerenciados pelo banco antes de fazer o merge
-    const { nextTicketId, ticketCounter, lastSlaCheckDate, ...userSettings } = settings;
+    const { nextTicketId, ticketCounter, lastSlaCheckDate, ...userUpdates } = updates;
 
-    // Merge: DB settings base + novos settings do usuário
+    // Merge: DB settings base + apenas os campos alterados pelo usuário
     // Campos do banco (nextTicketId, lastSlaCheckDate) são sempre preservados
     const mergedSettings = {
       ...dbSettings,
-      ...userSettings,
+      ...userUpdates,
       ...(dbSettings.nextTicketId !== undefined   ? { nextTicketId: dbSettings.nextTicketId }   : {}),
       ...(dbSettings.lastSlaCheckDate !== undefined ? { lastSlaCheckDate: dbSettings.lastSlaCheckDate } : {}),
     };
